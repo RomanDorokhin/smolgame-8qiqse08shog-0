@@ -58,7 +58,8 @@ function weekKey() {
   const y = t.getUTCFullYear();
   const w1 = new Date(Date.UTC(y, 0, 1));
   const w = Math.ceil((((t - w1) / 86400000) + 1) / 7);
-  return y + '-W' + String(w).padStart(2, '0');
+  const ws = w < 10 ? '0' + w : '' + w;
+  return y + '-W' + ws;
 }
 
 let stars = [];
@@ -76,12 +77,13 @@ function syncSize() {
   W = canvas.width = Math.min(window.innerWidth, 420);
   H = canvas.height = window.innerHeight;
   GR = H * 0.72;
-  player.x = W * 0.2;
-  if (player.y >= GR) player.y = GR;
-  regenStars();
+  if (typeof player !== 'undefined') {
+    player.x = W * 0.2;
+    if (player.y >= GR) player.y = GR;
+  }
+  if (typeof W === 'number' && W > 0) regenStars();
 }
 
-syncSize();
 window.addEventListener('resize', syncSize);
 
 const groundY = () => GR + player.h;
@@ -138,6 +140,8 @@ const player = {
   dead: false,
   trail: [],
 };
+
+syncSize();
 
 let obstacles = [];
 let particles = [];
