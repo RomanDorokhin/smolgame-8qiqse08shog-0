@@ -143,15 +143,16 @@ function resetGame() {
   dino.x = -80;
   dino.vy = 0;
   dino.jumpCd = 0;
-  state.nextDinoAt = 200 + Math.floor(Math.random() * 280);
+  state.nextDinoAt = 38 + Math.floor(Math.random() * 42);
 }
 
 function spawnDino() {
   dino.active = true;
-  dino.x = -70;
+  /* стартуем чуть сзади игрока — сразу «перегонки», не с края экрана */
+  dino.x = player.x - 95 - Math.floor(Math.random() * 35);
   dino.vy = 0;
   dino.y = groundY() - dino.h;
-  dino.jumpCd = 15;
+  dino.jumpCd = 10;
 }
 
 /** Chrome-style offline T-Rex (grey blocks, no shadows) */
@@ -191,7 +192,7 @@ function updateDino() {
   const floor = groundY() - dino.h;
   if (dino.jumpCd > 0) dino.jumpCd--;
 
-  dino.x += 5.8 + state.speed * 0.35;
+  dino.x += state.speed + 1.15 + state.speed * 0.06;
 
   let wantJump = false;
   if (dino.y >= floor - 0.5 && dino.jumpCd === 0) {
@@ -203,7 +204,7 @@ function updateDino() {
         break;
       }
     }
-    if (!wantJump && state.frame % 110 === 17) wantJump = true;
+    if (!wantJump && state.frame % 72 === 11) wantJump = true;
   }
   if (wantJump && dino.y >= floor - 0.5 && dino.jumpCd === 0) {
     dino.vy = -12.5;
@@ -219,7 +220,7 @@ function updateDino() {
 
   if (dino.x > W + 60) {
     dino.active = false;
-    state.nextDinoAt = state.frame + 320 + Math.floor(Math.random() * 400);
+    state.nextDinoAt = state.frame + 55 + Math.floor(Math.random() * 75);
   }
 }
 
