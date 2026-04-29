@@ -34,6 +34,18 @@ const W = canvas.width = Math.min(window.innerWidth, 420);
 const H = canvas.height = window.innerHeight;
 
 const GR = H * 0.72;
+/** feet baseline (same as player standing) */
+const groundY = () => GR + player.h;
+
+let dino = {
+  active: false,
+  x: -80,
+  y: 0,
+  vy: 0,
+  w: 46,
+  h: 34,
+  jumpCd: 0,
+};
 
 function rr(ctx, x, y, w, h, r) {
   r = Math.min(r, w / 2, h / 2);
@@ -58,6 +70,7 @@ const state = {
   speed: 5,
   frame: 0,
   flash: 0,
+  nextDinoAt: 0,
 };
 
 const player = {
@@ -126,6 +139,88 @@ function resetGame() {
   state.speed = 5;
   state.frame = 0;
   state.flash = 0;
+  dino.active = false;
+  dino.x = -80;
+  dino.vy = 0;
+  dino.jumpCd = 0;
+  state.nextDinoAt = 200 + Math.floor(Math.random() * 280);
+}
+
+function spawnDino() {
+  dino.active = true;
+  dino.x = -70;
+  dino.vy = 0;
+  dino.y = groundY() - dino.h;
+  dino.jumpCd = 15;
+}
+
+/** Chrome-style offline T-Rex (grey blocks, no shadows) */
+function drawChromeDino() {
+  if (!dino.active) return;
+  const gx = dino.x;
+  const gy = dino.y;
+  const leg = (Math.floor(state.frame / 4) % 2);
+  ctx.save();
+  ctx.fillStyle = '#535353';
+  ctx.strokeStyle = '#535353';
+  ctx.lineWidth = 1;
+  const s = 1.15;
+  ctx.translate(gx, gy);
+  ctx.scale(s, s);
+  const px = (x, y, w, h) => ctx.fillRect(x, y, w, h);
+  px(32, 4, 14, 8);
+  px(28, 10, 22, 12);
+  px(8, 14, 24, 10);
+  px(0, 18, 12, 8);
+  px(10, 22, 10, 6);
+  px(22, 24, 8, 6);
+  if (leg === 0) {
+    px(24, 28, 5, 6);
+    px(32, 28, 5, 6);
+  } else {
+    px(26, 28, 5, 6);
+    px(34, 26, 5, 8);
+  }
+  ctx.fillStyle = '#3f3f3f';
+  px(40, 6, 3, 3);
+  ctx.restore();
+}
+
+function updateDino() {
+  if (!dino.active || state.phase !== 'play') return;
+  const floor = groundY() - dino.h;
+  if (dino.jumpCd > 0) dino.jumpCd--;
+
+  dino.x += 5.8 + state.speed * 0.35;
+
+  let wantJump = false;
+  if (dino.y >= floor - 0.5 && dino.jumpCd === 0) {
+    for (let i = 0; i < obstacles.length; i++) {
+      const ob = obstacles[i];
+      const ahead = ob.x - (dino.x + dino.w);
+      if (ahead > 8 && ahead < 72 && ob.h > 18) {
+        wantJump = true;
+        break;
+      }
+    }
+    if (!wantJump && state.frame % 110 === 17) wantJump = true;
+  }
+  if (wantJump && dino.y >= floor - 0.5 && dino.jumpCd === 0) {
+    dino.vy = -12.5;
+    dino.jumpCd = 42;
+  }
+
+  dino.vy += GRAVITY;
+  dino.y += dino.vy;
+  if (dino.y >= floor) {
+    dino.y = floor;
+    dino.vy = 0;
+  }
+
+  if (dino.x > W + 60) {
+    dino.active = false;
+    state.nextDinoAt = state.frame + 320 + Math.floor(Math.random() * 400);
+  }
 }
 
 function spawnJumpParticles() {
@@ -414,6 +509,11 @@ function update() {
   particles = particles.filter(p => p.life > 0);
 
   if (state.flash > 0) state.flash--;
+
+  if (state.phase === 'play' && !dino.active && state.frame >= state.nextDinoAt) {
+    spawnDino();
+  }
+  if (state.phase === 'play') updateDino();
 }
 
 function draw() {
@@ -427,6 +527,7 @@ function draw() {
   drawParticles();
   drawObstacles();
   if (!player.dead || state.flash > 0) drawPlayer();
+  drawChromeDino();
   drawHUD();
 
   if (state.phase === 'start') {
