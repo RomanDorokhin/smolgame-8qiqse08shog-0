@@ -30,11 +30,60 @@
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 
-const W = canvas.width = Math.min(window.innerWidth, 420);
-const H = canvas.height = window.innerHeight;
+let W, H, GR;
 
-const GR = H * 0.72;
-/** feet baseline (same as player standing) */
+const PALETTES = [
+  { bg: '#0a0a0f', ground: '#1a1a2e', groundLine: '#7B2FBE', player: '#a855f7', playerGlow: '#c084fc', obstacle: '#f43f5e', obstacleGlow: '#fb7185', score: '#e2e8f0', accent: '#7c3aed', trail: '#7c3aed' },
+  { bg: '#0c1220', ground: '#152238', groundLine: '#38bdf8', player: '#818cf8', playerGlow: '#a5b4fc', obstacle: '#f97316', obstacleGlow: '#fdba74', score: '#e0f2fe', accent: '#6366f1', trail: '#818cf8' },
+  { bg: '#0f0a14', ground: '#231528', groundLine: '#ec4899', player: '#34d399', playerGlow: '#6ee7b7', obstacle: '#f472b6', obstacleGlow: '#fbcfe8', score: '#fce7f3', accent: '#10b981', trail: '#34d399' },
+  { bg: '#0a1210', ground: '#13221e', groundLine: '#22d3ee', player: '#fbbf24', playerGlow: '#fde68a', obstacle: '#ef4444', obstacleGlow: '#fca5a5', score: '#ecfccb', accent: '#eab308', trail: '#fbbf24' },
+];
+
+let COLORS = { ...PALETTES[0] };
+
+function applyPaletteByScore(score) {
+  const i = Math.min(PALETTES.length - 1, Math.floor(score / 420)) % PALETTES.length;
+  Object.assign(COLORS, PALETTES[i]);
+}
+
+function todayKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function weekKey() {
+  const d = new Date();
+  const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const day = t.getUTCDay() || 7;
+  t.setUTCDate(t.getUTCDate() + 4 - day);
+  const y = t.getUTCFullYear();
+  const w1 = new Date(Date.UTC(y, 0, 1));
+  const w = Math.ceil((((t - w1) / 86400000) + 1) / 7);
+  return y + '-W' + String(w).padStart(2, '0');
+}
+
+let stars = [];
+
+function regenStars() {
+  stars = Array.from({ length: 60 }, () => ({
+    x: Math.random() * W,
+    y: Math.random() * GR * 0.9,
+    r: Math.random() * 1.5 + 0.3,
+    blink: Math.random() * Math.PI * 2,
+  }));
+}
+
+function syncSize() {
+  W = canvas.width = Math.min(window.innerWidth, 420);
+  H = canvas.height = window.innerHeight;
+  GR = H * 0.72;
+  player.x = W * 0.2;
+  if (player.y >= GR) player.y = GR;
+  regenStars();
+}
+
+syncSize();
+window.addEventListener('resize', syncSize);
+
 const groundY = () => GR + player.h;
 
 let dino = {
@@ -62,15 +111,20 @@ function rr(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
+const DAILY_GOAL = 500;
 
 const state = {
   phase: 'start',
   score: 0,
-  best: parseInt(localStorage.getItem('smol_best') || '0'),
+  best: parseInt(localStorage.getItem('smol_best') || '0', 10),
   speed: 5,
   frame: 0,
   flash: 0,
   nextDinoAt: 0,
+  hitstop: 0,
+  soundOn: false,
+  goalToast: 0,
+  recordedDeath: false,
 };
 
 const player = {
@@ -87,27 +141,74 @@ const player = {
 
 let obstacles = [];
 let particles = [];
-let stars = Array.from({length: 60}, () => ({
-  x: Math.random() * W,
-  y: Math.random() * GR * 0.9,
-  r: Math.random() * 1.5 + 0.3,
-  blink: Math.random() * Math.PI * 2,
-}));
+
+let audioCtx;
+function playTone(freq, dur, vol) {
+  if (!state.soundOn) return;
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    audioCtx = audioCtx || new AC();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = 'square';
+    o.frequency.value = freq;
+    g.gain.value = vol;
+    o.connect(g);
+    g.connect(audioCtx.destination);
+    o.start();
+    o.stop(audioCtx.currentTime + dur);
+  } catch (e) {}
+}
 
 const GRAVITY = 0.65;
 const JUMP_FORCE = -14;
-const COLORS = {
-  bg: '#0a0a0f',
-  ground: '#1a1a2e',
-  groundLine: '#7B2FBE',
-  player: '#a855f7',
-  playerGlow: '#c084fc',
-  obstacle: '#f43f5e',
-  obstacleGlow: '#fb7185',
-  score: '#e2e8f0',
-  accent: '#7c3aed',
-  trail: '#7c3aed',
+
+const OB = {
+  low: { w: 38, h: 28 },
+  tall: { w: 18, h: 65 },
+  wide: { w: 50, h: 22 },
+  mid: { w: 22, h: 45 },
 };
+
+function pushObstacle(t, xExtra) {
+  obstacles.push({
+    x: W + 20 + (xExtra || 0),
+    y: GR - t.h + player.h,
+    w: t.w,
+    h: t.h,
+    pulse: Math.random() * Math.PI * 2,
+  });
+}
+
+function spawnObstacleWave() {
+  const u = Math.random();
+  if (u < 0.34) {
+    const pool = [OB.low, OB.tall, OB.wide, OB.mid];
+    pushObstacle(pool[Math.floor(Math.random() * pool.length)]);
+  } else if (u < 0.54) {
+    pushObstacle(OB.low, 0);
+    pushObstacle(OB.tall, 78);
+  } else if (u < 0.72) {
+    pushObstacle(OB.low, 0);
+    pushObstacle(OB.low, 64);
+  } else if (u < 0.86) {
+    pushObstacle(OB.tall);
+  } else {
+    pushObstacle(OB.wide, 0);
+    pushObstacle(OB.mid, 108);
+  }
+}
+
+function toggleSoundTap(clientX, clientY) {
+  if (clientX > W - 56 && clientY < 48) {
+    state.soundOn = !state.soundOn;
+    if (state.soundOn) playTone(440, 0.06, 0.04);
+    return true;
+  }
+  return false;
+}
 
 function jump() {
   if (state.phase === 'start') {
@@ -124,6 +225,7 @@ function jump() {
     player.vy = JUMP_FORCE * (player.jumps === 1 ? 0.8 : 1);
     player.jumps++;
     spawnJumpParticles();
+    playTone(520, 0.04, 0.06);
   }
 }
 
@@ -139,32 +241,32 @@ function resetGame() {
   state.speed = 5;
   state.frame = 0;
   state.flash = 0;
+  state.hitstop = 0;
+  state.recordedDeath = false;
+  state.goalToast = 0;
   dino.active = false;
   dino.x = -80;
   dino.vy = 0;
   dino.jumpCd = 0;
   state.nextDinoAt = 38 + Math.floor(Math.random() * 42);
+  applyPaletteByScore(0);
 }
 
 function spawnDino() {
   dino.active = true;
-  /* стартуем чуть сзади игрока — сразу «перегонки», не с края экрана */
   dino.x = player.x - 95 - Math.floor(Math.random() * 35);
   dino.vy = 0;
   dino.y = groundY() - dino.h;
   dino.jumpCd = 10;
 }
 
-/** Chrome-style offline T-Rex (grey blocks, no shadows) */
 function drawChromeDino() {
   if (!dino.active) return;
   const gx = dino.x;
   const gy = dino.y;
-  const leg = (Math.floor(state.frame / 4) % 2);
+  const leg = Math.floor(state.frame / 4) % 2;
   ctx.save();
   ctx.fillStyle = '#535353';
-  ctx.strokeStyle = '#535353';
-  ctx.lineWidth = 1;
   const s = 1.15;
   ctx.translate(gx, gy);
   ctx.scale(s, s);
@@ -188,7 +290,8 @@ function drawChromeDino() {
 }
 
 function updateDino() {
-  if (!dino.active || state.phase !== 'play') return;
+  if (!dino.active || state.phase !== 'play' || player.dead) return;
+  if (state.hitstop > 0) return;
   const floor = groundY() - dino.h;
   if (dino.jumpCd > 0) dino.jumpCd--;
 
@@ -239,37 +342,20 @@ function spawnJumpParticles() {
 }
 
 function spawnDeathParticles() {
-  for (let i = 0; i < 24; i++) {
-    const angle = (Math.PI * 2 * i) / 24 + Math.random() * 0.3;
-    const spd = 3 + Math.random() * 6;
+  for (let i = 0; i < 12; i++) {
+    const angle = (Math.PI * 2 * i) / 12 + Math.random() * 0.25;
+    const spd = 2 + Math.random() * 4;
     particles.push({
       x: player.x + player.w / 2,
       y: player.y + player.h / 2,
       vx: Math.cos(angle) * spd,
       vy: Math.sin(angle) * spd,
       life: 1,
-      decay: 0.025 + Math.random() * 0.02,
-      r: 3 + Math.random() * 5,
+      decay: 0.03 + Math.random() * 0.02,
+      r: 2 + Math.random() * 3,
       death: true,
     });
   }
-}
-
-function spawnObstacle() {
-  const types = [
-    { w: 22, h: 45 },
-    { w: 38, h: 28 },
-    { w: 18, h: 65 },
-    { w: 50, h: 22 },
-  ];
-  const t = types[Math.floor(Math.random() * types.length)];
-  obstacles.push({
-    x: W + 20,
-    y: GR - t.h + player.h,
-    w: t.w,
-    h: t.h,
-    pulse: Math.random() * Math.PI * 2,
-  });
 }
 
 function checkCollision(a, b) {
@@ -282,37 +368,19 @@ function checkCollision(a, b) {
   );
 }
 
-function drawGlow(x, y, r, color, alpha) {
-  const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-  g.addColorStop(0, color.replace(')', `,${alpha})`).replace('rgb', 'rgba'));
-  g.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = g;
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, Math.PI * 2);
-  ctx.fill();
-}
-
 function drawPlayer() {
-  const cx = player.x + player.w / 2;
-  const cy = player.y + player.h / 2;
-
-  // trail
   player.trail.forEach((t, i) => {
     const alpha = (i / player.trail.length) * 0.3;
     ctx.fillStyle = `rgba(124,58,237,${alpha})`;
     ctx.fillRect(t.x, t.y, player.w * (i / player.trail.length), player.h * (i / player.trail.length));
   });
 
-  // glow
   ctx.shadowBlur = 20;
   ctx.shadowColor = COLORS.playerGlow;
-
-  // body
   ctx.fillStyle = COLORS.player;
-    rr(ctx, player.x, player.y, player.w, player.h, 6);
+  rr(ctx, player.x, player.y, player.w, player.h, 6);
   ctx.fill();
 
-  // eyes
   ctx.shadowBlur = 0;
   ctx.fillStyle = '#fff';
   const eyeY = player.y + 10;
@@ -332,7 +400,6 @@ function drawPlayer() {
   ctx.ellipse(player.x + 19, eyeY, 2, 2 * squish, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // legs
   const legAnim = Math.sin(state.frame * 0.25) * 6;
   if (player.jumps === 0) {
     ctx.fillStyle = '#7c3aed';
@@ -347,13 +414,11 @@ function drawObstacles() {
   obstacles.forEach(ob => {
     ob.pulse += 0.05;
     const glow = Math.sin(ob.pulse) * 3;
-
     ctx.shadowBlur = 15 + glow;
     ctx.shadowColor = COLORS.obstacleGlow;
     ctx.fillStyle = COLORS.obstacle;
-        rr(ctx, ob.x, ob.y, ob.w, ob.h, 4);
+    rr(ctx, ob.x, ob.y, ob.w, ob.h, 4);
     ctx.fill();
-
     ctx.shadowBlur = 0;
     ctx.strokeStyle = '#fb7185';
     ctx.lineWidth = 1;
@@ -375,7 +440,6 @@ function drawGround() {
   ctx.stroke();
   ctx.shadowBlur = 0;
 
-  // grid lines
   const offset = (state.frame * state.speed) % 60;
   ctx.strokeStyle = 'rgba(123,47,190,0.15)';
   ctx.lineWidth = 1;
@@ -400,15 +464,21 @@ function drawStars() {
 
 function drawParticles() {
   particles.forEach(p => {
-    const col = p.death ? COLORS.obstacle : COLORS.trail;
-    ctx.fillStyle = col.replace(')', `,${p.life})`).startsWith('rgba') ? col : col;
     ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.death ? COLORS.obstacle : COLORS.trail;
     ctx.beginPath();
     ctx.arc(p.x, p.y, p.r * p.life, 0, Math.PI * 2);
-    ctx.fillStyle = p.death ? COLORS.obstacle : COLORS.trail;
     ctx.fill();
   });
   ctx.globalAlpha = 1;
+}
+
+function drawSoundButton() {
+  ctx.textAlign = 'right';
+  ctx.font = `${Math.max(11, W * 0.035)}px 'Courier New'`;
+  ctx.fillStyle = state.soundOn ? 'rgba(52,211,153,0.95)' : 'rgba(148,163,184,0.85)';
+  ctx.fillText(state.soundOn ? '🔊' : '🔇', W - 10, 28);
+  ctx.textAlign = 'center';
 }
 
 function drawHUD() {
@@ -417,17 +487,36 @@ function drawHUD() {
   ctx.textAlign = 'center';
   ctx.fillText(Math.floor(state.score), W / 2, H * 0.08);
 
+  ctx.font = `${W * 0.032}px 'Courier New'`;
+  ctx.fillStyle = 'rgba(168,85,247,0.75)';
+  const td = parseInt(localStorage.getItem('smol_best_' + todayKey()) || '0', 10);
+  const wk = parseInt(localStorage.getItem('smol_best_' + weekKey()) || '0', 10);
+  ctx.fillText(`СЕГОДНЯ ${td}  ·  НЕДЕЛЯ ${wk}`, W / 2, H * 0.125);
+
   ctx.font = `${W * 0.04}px 'Courier New'`;
   ctx.fillStyle = 'rgba(168,85,247,0.8)';
-  ctx.fillText(`BEST ${state.best}`, W / 2, H * 0.13);
+  ctx.fillText(`BEST ${state.best}`, W / 2, H * 0.155);
 
-  // jump dots
+  const gk = 'smol_goal_' + todayKey();
+  const goalDone = localStorage.getItem(gk) === '1';
+  ctx.font = `${W * 0.03}px 'Courier New'`;
+  ctx.fillStyle = goalDone ? 'rgba(52,211,153,0.9)' : 'rgba(250,204,21,0.85)';
+  ctx.fillText(goalDone ? `ЦЕЛЬ ${DAILY_GOAL} ✓` : `ЦЕЛЬ ${DAILY_GOAL}`, W / 2, H * 0.185);
+
+  if (state.goalToast > 0) {
+    ctx.font = `bold ${W * 0.045}px 'Courier New'`;
+    ctx.fillStyle = 'rgba(52,211,153,0.95)';
+    ctx.fillText('ЦЕЛЬ ДНЯ!', W / 2, H * 0.26);
+  }
+
   for (let i = 0; i < player.maxJumps; i++) {
     ctx.beginPath();
-    ctx.arc(W / 2 - 12 + i * 20, H * 0.17, 5, 0, Math.PI * 2);
+    ctx.arc(W / 2 - 12 + i * 20, H * 0.2, 5, 0, Math.PI * 2);
     ctx.fillStyle = i < player.jumps ? 'rgba(168,85,247,0.2)' : '#a855f7';
     ctx.fill();
   }
+
+  drawSoundButton();
 }
 
 function drawScreen(title, sub) {
@@ -439,34 +528,91 @@ function drawScreen(title, sub) {
   ctx.shadowColor = '#7c3aed';
   ctx.fillStyle = '#e2e8f0';
   ctx.font = `bold ${W * 0.13}px 'Courier New'`;
-  ctx.fillText(title, W / 2, H * 0.42);
+  ctx.fillText(title, W / 2, H * 0.4);
   ctx.shadowBlur = 0;
+
+  ctx.font = `${W * 0.045}px 'Courier New'`;
+  ctx.fillStyle = 'rgba(148,163,184,0.9)';
+  ctx.fillText('Звук: тап по 🔇 справа сверху', W / 2, H * 0.48);
 
   ctx.font = `${W * 0.055}px 'Courier New'`;
   ctx.fillStyle = 'rgba(168,85,247,0.9)';
-  ctx.fillText(sub, W / 2, H * 0.52);
+  ctx.fillText(sub, W / 2, H * 0.55);
 
   if (state.phase === 'dead') {
     ctx.font = `${W * 0.05}px 'Courier New'`;
     ctx.fillStyle = 'rgba(226,232,240,0.6)';
-    ctx.fillText(`СЧЁТ ${Math.floor(state.score)}`, W / 2, H * 0.6);
-    ctx.fillText(`РЕКОРД ${state.best}`, W / 2, H * 0.66);
+    ctx.fillText(`СЧЁТ ${Math.floor(state.score)}`, W / 2, H * 0.63);
+    ctx.fillText(`РЕКОРД ${state.best}`, W / 2, H * 0.69);
   }
+}
+
+function tickParticlesAndFlash() {
+  particles.forEach(p => {
+    p.x += p.vx;
+    p.y += p.vy;
+    if (!p.death) p.vy += 0.1;
+    p.life -= p.decay;
+  });
+  particles = particles.filter(p => p.life > 0);
+  if (state.flash > 0) state.flash--;
+  if (state.goalToast > 0) state.goalToast--;
+}
+
+function recordDeathScore() {
+  if (state.recordedDeath) return;
+  state.recordedDeath = true;
+  const s = Math.floor(state.score);
+  const tk = todayKey();
+  const wkk = weekKey();
+  if (s > state.best) {
+    state.best = s;
+    localStorage.setItem('smol_best', String(state.best));
+  }
+  const bt = parseInt(localStorage.getItem('smol_best_' + tk) || '0', 10);
+  if (s > bt) localStorage.setItem('smol_best_' + tk, String(s));
+  const bw = parseInt(localStorage.getItem('smol_best_' + wkk) || '0', 10);
+  if (s > bw) localStorage.setItem('smol_best_' + wkk, String(s));
 }
 
 function update() {
   if (state.phase !== 'play') return;
 
+  if (state.hitstop > 0) {
+    state.hitstop--;
+    tickParticlesAndFlash();
+    return;
+  }
+
+  if (player.dead) {
+    obstacles.forEach(ob => {
+      ob.x -= state.speed;
+    });
+    obstacles = obstacles.filter(ob => ob.x > -100);
+    tickParticlesAndFlash();
+    return;
+  }
+
   state.frame++;
+  const warmup = state.frame < 200;
+  let spdAdd = state.score * 0.012;
+  if (warmup) spdAdd *= 0.52;
   state.score += state.speed * 0.05;
-  state.speed = 5 + state.score * 0.012;
+  state.speed = 5 + spdAdd;
   if (state.speed > 18) state.speed = 18;
 
-  // player trail
+  applyPaletteByScore(state.score);
+
+  if (state.score >= DAILY_GOAL && localStorage.getItem('smol_goal_' + todayKey()) !== '1') {
+    localStorage.setItem('smol_goal_' + todayKey(), '1');
+    state.goalToast = 90;
+    playTone(660, 0.07, 0.05);
+    playTone(880, 0.08, 0.04);
+  }
+
   player.trail.unshift({ x: player.x, y: player.y });
   if (player.trail.length > 8) player.trail.pop();
 
-  // gravity
   player.vy += GRAVITY;
   player.y += player.vy;
 
@@ -476,51 +622,44 @@ function update() {
     player.jumps = 0;
   }
 
-  // obstacles spawn
-  const spawnRate = Math.max(55, 110 - state.speed * 3);
+  let spawnRate = Math.max(55, 110 - state.speed * 3);
+  if (warmup) spawnRate *= 1.42;
   if (state.frame % Math.floor(spawnRate) === 0) {
-    spawnObstacle();
+    spawnObstacleWave();
   }
 
-  // move obstacles
-  obstacles.forEach(ob => ob.x -= state.speed);
+  obstacles.forEach(ob => {
+    ob.x -= state.speed;
+  });
   obstacles = obstacles.filter(ob => ob.x > -100);
 
-  // collision
   obstacles.forEach(ob => {
     if (checkCollision(player, ob) && !player.dead) {
       player.dead = true;
-      state.flash = 10;
+      state.hitstop = 10;
+      state.flash = 8;
       spawnDeathParticles();
-      if (Math.floor(state.score) > state.best) {
-        state.best = Math.floor(state.score);
-        localStorage.setItem('smol_best', state.best);
-      }
-      setTimeout(() => { state.phase = 'dead'; }, 600);
+      recordDeathScore();
+      playTone(140, 0.14, 0.07);
+      setTimeout(() => {
+        state.phase = 'dead';
+      }, 650);
     }
   });
 
-  // particles
-  particles.forEach(p => {
-    p.x += p.vx;
-    p.y += p.vy;
-    if (!p.death) p.vy += 0.1;
-    p.life -= p.decay;
-  });
-  particles = particles.filter(p => p.life > 0);
+  tickParticlesAndFlash();
 
-  if (state.flash > 0) state.flash--;
-
-  if (state.phase === 'play' && !dino.active && state.frame >= state.nextDinoAt) {
+  if (!dino.active && state.frame >= state.nextDinoAt) {
     spawnDino();
   }
-  if (state.phase === 'play') updateDino();
+  updateDino();
 }
 
 function draw() {
-  ctx.fillStyle = state.flash > 0
-    ? `rgba(244,63,94,${state.flash / 10 * 0.3})`
-    : COLORS.bg;
+  ctx.fillStyle =
+    state.flash > 0
+      ? `rgba(244,63,94,${(state.flash / 10) * 0.22})`
+      : COLORS.bg;
   ctx.fillRect(0, 0, W, H);
 
   drawStars();
@@ -545,13 +684,31 @@ function loop() {
   requestAnimationFrame(loop);
 }
 
-canvas.addEventListener('touchstart', e => {
-  e.preventDefault();
-  jump();
-}, { passive: false });
+function pointerClientPos(e) {
+  const r = canvas.getBoundingClientRect();
+  const x = (e.clientX - r.left) * (canvas.width / r.width);
+  const y = (e.clientY - r.top) * (canvas.height / r.height);
+  return { x, y };
+}
+
+canvas.addEventListener(
+  'touchstart',
+  e => {
+    e.preventDefault();
+    const t = e.changedTouches[0];
+    const r = canvas.getBoundingClientRect();
+    const x = (t.clientX - r.left) * (canvas.width / r.width);
+    const y = (t.clientY - r.top) * (canvas.height / r.height);
+    if (toggleSoundTap(x, y)) return;
+    jump();
+  },
+  { passive: false }
+);
 
 canvas.addEventListener('mousedown', e => {
   e.preventDefault();
+  const { x, y } = pointerClientPos(e);
+  if (toggleSoundTap(x, y)) return;
   jump();
 });
 
